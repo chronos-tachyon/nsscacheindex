@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"io/ioutil"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	getopt "github.com/pborman/getopt/v2"
@@ -72,21 +74,29 @@ func main() {
 			Msg("failed to open file")
 	}
 
+	defer src.Close()
+
+	fi, err := src.Stat()
+	if err != nil {
+		Logger.Fatal().
+			Str("source-file", flagSrcFile).
+			Err(err).
+			Msg("failed to stat source file")
+	}
+
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		Logger.Fatal().
+			Str("source-file", flagSrcFile).
+			Msgf("source file's io/fs.FileInfo object was backed by %T, not *syscall.Stat_t", fi.Sys())
+	}
+
 	rawBytes, err := ioutil.ReadAll(src)
 	if err != nil {
-		_ = src.Close()
 		Logger.Fatal().
 			Str("source-file", flagSrcFile).
 			Err(err).
 			Msg("failed to read from source file")
-	}
-
-	err = src.Close()
-	if err != nil {
-		Logger.Fatal().
-			Str("source-file", flagSrcFile).
-			Err(err).
-			Msg("failed to close source file")
 	}
 
 	keys := make([]string, 0, 1024)
@@ -111,11 +121,6 @@ func main() {
 			if ch == '\n' {
 				break
 			}
-		}
-
-		// Handle LF at the end of the last line of the file
-		if eof && lineOffset == fileOffset {
-			break
 		}
 
 		lineNumber++
@@ -170,11 +175,7 @@ func main() {
 	}
 
 	sort.Strings(keys)
-
-	Logger.Info().
-		Interface("keys", keys).
-		Interface("index", index).
-		Msgf("found %d rows in --source-file", len(keys))
+	Logger.Info().Msgf("found %d rows in --source-file", len(keys))
 
 	tempFile := flagDstFile + "~"
 
@@ -182,7 +183,7 @@ func main() {
 		Str("dest-file", flagDstFile).
 		Str("temp-file", tempFile).
 		Msg("opening destination binary index file")
-	dst, err := os.OpenFile(tempFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0666)
+	dst, err := os.OpenFile(tempFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
 		Logger.Fatal().
 			Str("temp-file", tempFile).
@@ -226,6 +227,25 @@ func main() {
 		}
 
 		buf.Reset()
+	}
+
+	err = dst.Chown(int(st.Uid), int(st.Gid))
+	if err != nil {
+		Logger.Fatal().
+			Str("temp-file", tempFile).
+			Uint32("uid", st.Uid).
+			Uint32("gid", st.Gid).
+			Err(err).
+			Msg("failed to chown file")
+	}
+
+	err = dst.Chmod(os.FileMode(st.Mode & 07777))
+	if err != nil {
+		Logger.Fatal().
+			Str("temp-file", tempFile).
+			Str("mode", fmt.Sprintf("0o%04o", st.Mode&07777)).
+			Err(err).
+			Msg("failed to chmod file")
 	}
 
 	err = dst.Close()
